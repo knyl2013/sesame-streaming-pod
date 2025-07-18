@@ -1,7 +1,7 @@
 # Server
 fastapi
 uvicorn
-python-websockets
+websockets
 
 # AI Models
 torch
