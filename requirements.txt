@@ -1,0 +1,18 @@
+# Server
+fastapi
+uvicorn
+python-websockets
+
+# AI Models
+torch
+transformers
+accelerate
+soundfile
+scipy
+
+# ASR & Audio
+openai-whisper
+pydub
+
+# LLM Client (we'll use Groq for a fast, free API to start)
+groq
