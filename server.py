@@ -48,18 +48,36 @@ async def websocket_endpoint(websocket: WebSocket):
     print("Client connected.")
     
     conversation_history = []
-    
+    input_audio_path = "temp_user_audio_input.webm"
+    converted_audio_path = "temp_user_audio_converted.wav"
+
     try:
         while True:
             user_audio_bytes = await websocket.receive_bytes()
-            
-            # Save the incoming WAV file blob to a temporary file
-            temp_audio_path = "temp_user_audio.wav"
-            with open(temp_audio_path, "wb") as f:
+
+            with open(input_audio_path, "wb") as f:
                 f.write(user_audio_bytes)
 
+            print("Converting received audio to WAV format...")
+            try:
+                command = [
+                    "ffmpeg",
+                    "-i", input_audio_path,   # Input file
+                    "-ar", "16000",           # Set sample rate to 16kHz for Whisper
+                    "-ac", "1",               # Set to mono audio
+                    "-c:a", "pcm_s16le",      # Use standard WAV codec
+                    "-y",                     # Overwrite output file if it exists
+                    converted_audio_path
+                ]
+                subprocess.run(command, check=True, capture_output=True)
+                print("Conversion successful.")
+            except subprocess.CalledProcessError as e:
+                print(f"FFmpeg conversion failed: {e.stderr.decode()}")
+                # Optional: Send an error message back to the client
+                continue # Skip this loop iteration if conversion fails
+
             print("Transcribing user audio...")
-            user_text = asr_pipeline(temp_audio_path)["text"]
+            user_text = asr_pipeline(converted_audio_path)["text"]
             print(f"User said: {user_text}")
             
             conversation_history.append({"role": "user", "content": user_text})
@@ -73,13 +91,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             print("Generating and streaming AI speech...")
             
-            # ---vvv--- THIS IS THE FIX ---vvv---
             # Instead of using frombuffer, we properly READ the saved WAV file.
             # This correctly handles the file header and gives us the raw audio data.
-            sr, wav_data = read(temp_audio_path)
+            sr, wav_data = read(converted_audio_path)
             history_waveform = torch.from_numpy(wav_data).float().to(device) / 32768.0
             # For even more robustness, you could add code here to resample if sr != 24000
-            # ---^^^--- END OF FIX ---^^^---
             
             sentences = ai_response_text.replace('!', '.').replace('?', '.').split('.')
 
@@ -103,8 +119,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print("Client disconnected.")
     finally:
-        if os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
+        if os.path.exists(input_audio_path): os.remove(input_audio_path)
+        if os.path.exists(converted_audio_path): os.remove(converted_audio_path)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
