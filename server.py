@@ -5,7 +5,8 @@ import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
-from transformers import pipeline, AutoProcessor, AutoModelForTextToSpectrogram
+# ---vvv--- CRITICAL FIX #1: Import the SPECIFIC classes ---vvv---
+from transformers import pipeline, CsmProcessor, CsmForConditionalGeneration
 from scipy.io.wavfile import write
 import numpy as np
 import io
@@ -19,12 +20,12 @@ torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
 # Get API keys from environment variables
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-HUGGING_FACE_TOKEN = os.environ.get("HUGGING_FACE_TOKEN") # <-- NEW: Get HF Token
+HUGGING_FACE_TOKEN = os.environ.get("HUGGING_FACE_TOKEN")
 
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY environment variable not set!")
 if not HUGGING_FACE_TOKEN:
-    raise ValueError("HUGGING_FACE_TOKEN environment variable not set!") # <-- NEW: Check for token
+    raise ValueError("HUGGING_FACE_TOKEN environment variable not set!")
 
 llm_client = Groq(api_key=GROQ_API_KEY)
 
@@ -40,26 +41,26 @@ print("ASR model loaded.")
 
 # TTS (Sesame CSM) Models
 print("Loading TTS model...")
-# ---vvv--- CRITICAL FIXES ARE HERE ---vvv---
-TTS_REPO_ID = "sesame/csm-1b" # <-- FIX #1: Correct repository name
+TTS_REPO_ID = "sesame/csm-1b"
 
-tts_processor = AutoProcessor.from_pretrained(
+# ---vvv--- CRITICAL FIX #2: Use the SPECIFIC classes ---vvv---
+tts_processor = CsmProcessor.from_pretrained(
     TTS_REPO_ID, 
-    token=HUGGING_FACE_TOKEN # <-- FIX #2: Pass the token
+    token=HUGGING_FACE_TOKEN
 ) 
-tts_model = AutoModelForTextToSpectrogram.from_pretrained(
+tts_model = CsmForConditionalGeneration.from_pretrained(
     TTS_REPO_ID, 
-    token=HUGGING_FACE_TOKEN # <-- FIX #2: Pass the token
+    token=HUGGING_FACE_TOKEN
 ).to(device)
 # ---^^^--- END OF CRITICAL FIXES ---^^^---
 
 TTS_SAMPLE_RATE = 24000
-print("TTS model loaded.")
+print("TTS model loaded successfully.") # Changed message for clarity
 
 app = FastAPI()
 
 # --- 2. THE WEBSOCKET CONVERSATION HANDLER (No changes needed here) ---
-
+# ... (The rest of your server.py code from @app.websocket onwards remains exactly the same) ...
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
