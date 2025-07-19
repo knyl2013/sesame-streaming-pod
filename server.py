@@ -9,7 +9,7 @@ from transformers import pipeline, AutoProcessor, AutoModelForTextToSpectrogram
 from scipy.io.wavfile import write
 import numpy as np
 import io
-from groq import Groq # Using Groq for its speed, perfect for a streaming demo
+from groq import Groq
 
 # --- 1. CONFIGURATION AND MODEL LOADING (Happens once on startup) ---
 
@@ -17,11 +17,14 @@ print("Starting server and loading models...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-# IMPORTANT: Get your Groq API key from https://console.groq.com/keys
-# Set it as an environment variable in your Runpod Pod settings.
+# --- NEW: GET API KEYS FROM ENVIRONMENT ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+HF_TOKEN = os.environ.get("HUGGING_FACE_TOKEN") # <-- ADD THIS LINE
+
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY environment variable not set!")
+if not HF_TOKEN: # <-- ADD THIS CHECK
+    raise ValueError("HUGGING_FACE_TOKEN environment variable not set!")
 
 llm_client = Groq(api_key=GROQ_API_KEY)
 
@@ -37,31 +40,28 @@ print("ASR model loaded.")
 
 # TTS (Sesame CSM) Models
 print("Loading TTS model...")
-tts_processor = AutoProcessor.from_pretrained("sesame-ai/csm-1b")
-tts_model = AutoModelForTextToSpectrogram.from_pretrained("sesame-ai/csm-1b").to(device)
+# --- MODIFIED: PASS THE TOKEN TO HUGGING FACE ---
+tts_processor = AutoProcessor.from_pretrained("sesame-ai/csm-1b", token=HF_TOKEN)
+tts_model = AutoModelForTextToSpectrogram.from_pretrained("sesame-ai/csm-1b", token=HF_TOKEN).to(device)
 TTS_SAMPLE_RATE = 24000
 print("TTS model loaded.")
 
 app = FastAPI()
 
-# --- 2. THE WEBSOCKET CONVERSATION HANDLER ---
+# --- THE REST OF THE FILE (websocket handler, etc.) STAYS EXACTLY THE SAME ---
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("Client connected.")
     
-    # Store conversation history for context (simplified for this example)
     conversation_history = []
     
     try:
         while True:
-            # A. RECEIVE USER'S AUDIO
             user_audio_bytes = await websocket.receive_bytes()
             
-            # B. SPEECH-TO-TEXT (ASR)
             print("Transcribing user audio...")
-            # We need to save bytes to a temporary file for the pipeline
             with open("temp_user_audio.wav", "wb") as f:
                 f.write(user_audio_bytes)
             
@@ -70,7 +70,6 @@ async def websocket_endpoint(websocket: WebSocket):
             
             conversation_history.append({"role": "user", "content": user_text})
 
-            # C. LANGUAGE MODEL (LLM)
             print("Getting LLM response...")
             chat_completion = llm_client.chat.completions.create(
                 messages=conversation_history,
@@ -81,14 +80,9 @@ async def websocket_endpoint(websocket: WebSocket):
             
             conversation_history.append({"role": "assistant", "content": ai_response_text})
 
-            # D. TEXT-TO-SPEECH (TTS) - STREAMED
             print("Generating and streaming AI speech...")
-            # Split response into sentences for a better streaming feel
             sentences = ai_response_text.replace('!', '.').replace('?', '.').split('.')
             
-            # We need the user's audio as history for the TTS model
-            # For simplicity, we just use the raw bytes. A more advanced solution
-            # would resample it to 24kHz first.
             history_waveform = torch.from_numpy(np.frombuffer(user_audio_bytes, dtype=np.int16)).float().to(device) / 32768.0
 
             for sentence in sentences:
@@ -96,20 +90,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not sentence:
                     continue
 
-                # Generate speech for one sentence
                 inputs = tts_processor(text=sentence, speech_history=history_waveform, return_tensors="pt").to(device)
                 with torch.no_grad():
                     speech_values = tts_model.generate(**inputs, do_sample=True)
                 
-                # Convert tensor to wav bytes
                 output_waveform = speech_values.cpu().numpy().squeeze()
                 buffer = io.BytesIO()
                 write(buffer, TTS_SAMPLE_RATE, output_waveform.astype(np.float32))
                 
-                # Stream the audio chunk back to the client
                 await websocket.send_bytes(buffer.getvalue())
 
-            # Send an "end of stream" message so the client knows the AI is done talking
             await websocket.send_text('{"type": "end_of_stream"}')
             print("Finished streaming AI response.")
 
@@ -119,8 +109,5 @@ async def websocket_endpoint(websocket: WebSocket):
         if os.path.exists("temp_user_audio.wav"):
             os.remove("temp_user_audio.wav")
 
-# --- 3. SERVER STARTUP COMMAND ---
-
 if __name__ == "__main__":
-    # The server will run on port 8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
