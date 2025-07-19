@@ -17,14 +17,14 @@ print("Starting server and loading models...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-# --- NEW: GET API KEYS FROM ENVIRONMENT ---
+# Get API keys from environment variables
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-HF_TOKEN = os.environ.get("HUGGING_FACE_TOKEN") # <-- ADD THIS LINE
+HUGGING_FACE_TOKEN = os.environ.get("HUGGING_FACE_TOKEN") # <-- NEW: Get HF Token
 
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY environment variable not set!")
-if not HF_TOKEN: # <-- ADD THIS CHECK
-    raise ValueError("HUGGING_FACE_TOKEN environment variable not set!")
+if not HUGGING_FACE_TOKEN:
+    raise ValueError("HUGGING_FACE_TOKEN environment variable not set!") # <-- NEW: Check for token
 
 llm_client = Groq(api_key=GROQ_API_KEY)
 
@@ -40,15 +40,25 @@ print("ASR model loaded.")
 
 # TTS (Sesame CSM) Models
 print("Loading TTS model...")
-# --- MODIFIED: PASS THE TOKEN TO HUGGING FACE ---
-tts_processor = AutoProcessor.from_pretrained("sesame-ai/csm-1b", token=HF_TOKEN)
-tts_model = AutoModelForTextToSpectrogram.from_pretrained("sesame-ai/csm-1b", token=HF_TOKEN).to(device)
+# ---vvv--- CRITICAL FIXES ARE HERE ---vvv---
+TTS_REPO_ID = "sesame/csm-1b" # <-- FIX #1: Correct repository name
+
+tts_processor = AutoProcessor.from_pretrained(
+    TTS_REPO_ID, 
+    token=HUGGING_FACE_TOKEN # <-- FIX #2: Pass the token
+) 
+tts_model = AutoModelForTextToSpectrogram.from_pretrained(
+    TTS_REPO_ID, 
+    token=HUGGING_FACE_TOKEN # <-- FIX #2: Pass the token
+).to(device)
+# ---^^^--- END OF CRITICAL FIXES ---^^^---
+
 TTS_SAMPLE_RATE = 24000
 print("TTS model loaded.")
 
 app = FastAPI()
 
-# --- THE REST OF THE FILE (websocket handler, etc.) STAYS EXACTLY THE SAME ---
+# --- 2. THE WEBSOCKET CONVERSATION HANDLER (No changes needed here) ---
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
