@@ -34,43 +34,50 @@ app = FastAPI()
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("Client connected.")
+    # Use flush=True to ensure logs appear immediately in Runpod
+    print("Client connected.", flush=True) 
     
     conversation_history = []
+    
     input_audio_path = "temp_user_audio_input.webm"
     converted_audio_path = "temp_user_audio_converted.wav"
 
     try:
         while True:
-            # This line waits for the client to send audio data
+            # This is where the code is likely hanging, waiting for data.
             user_audio_bytes = await websocket.receive_bytes()
             
+            print(f"Received {len(user_audio_bytes)} bytes from client.", flush=True)
+
             with open(input_audio_path, "wb") as f:
                 f.write(user_audio_bytes)
 
-            # 1. Convert audio in a separate thread
-            print("Converting received audio to WAV format...")
-            ffmpeg_command = ["ffmpeg", "-i", input_audio_path, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", converted_audio_path]
-            await asyncio.to_thread(subprocess.run, ffmpeg_command, check=True, capture_output=True)
-            print("Conversion successful.")
+            print("Converting received audio to WAV format...", flush=True)
+            try:
+                command = [
+                    "ffmpeg", "-i", input_audio_path, "-ar", "16000",
+                    "-ac", "1", "-c:a", "pcm_s16le", "-y", converted_audio_path
+                ]
+                subprocess.run(command, check=True, capture_output=True)
+                print("Conversion successful.", flush=True)
+            except subprocess.CalledProcessError as e:
+                print(f"FFmpeg conversion failed: {e.stderr.decode()}", flush=True)
+                continue
 
-            # 2. Transcribe audio in a separate thread
-            print("Transcribing user audio...")
-            transcription_result = await asyncio.to_thread(asr_pipeline, converted_audio_path)
-            user_text = transcription_result["text"]
-            print(f"User said: {user_text}")
+            print("Transcribing user audio...", flush=True)
+            user_text = asr_pipeline(converted_audio_path)["text"]
+            print(f"User said: {user_text}", flush=True)
             
             conversation_history.append({"role": "user", "content": user_text})
 
-            # 3. Get LLM response in a separate thread
-            print("Getting LLM response...")
-            chat_completion = await asyncio.to_thread(llm_client.chat.completions.create, messages=conversation_history, model="llama3-8b-8192")
+            print("Getting LLM response...", flush=True)
+            chat_completion = llm_client.chat.completions.create(messages=conversation_history, model="llama3-8b-8192")
             ai_response_text = chat_completion.choices[0].message.content
-            print(f"AI response: {ai_response_text}")
+            print(f"AI response: {ai_response_text}", flush=True)
             
             conversation_history.append({"role": "assistant", "content": ai_response_text})
 
-            print("Generating and streaming AI speech...")
+            print("Generating and streaming AI speech...", flush=True)
             
             sr, wav_data = read(converted_audio_path)
             history_waveform = torch.from_numpy(wav_data).float().to(device) / 32768.0
@@ -82,25 +89,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not sentence: continue
 
                 inputs = tts_processor(text=sentence, speech_history=history_waveform, return_tensors="pt").to(device)
-                
-                # 4. Generate speech in a separate thread
                 with torch.no_grad():
-                    speech_values = await asyncio.to_thread(tts_model.generate, **inputs, do_sample=True)
+                    speech_values = tts_model.generate(**inputs, do_sample=True)
                 
                 output_waveform = speech_values.cpu().numpy().squeeze()
                 buffer = io.BytesIO()
                 write(buffer, TTS_SAMPLE_RATE, output_waveform.astype(np.float32))
                 
-                # Sending data back is async, so it doesn't need a thread
                 await websocket.send_bytes(buffer.getvalue())
 
             await websocket.send_text('{"type": "end_of_stream"}')
-            print("Finished streaming AI response.")
+            print("Finished streaming AI response.", flush=Ture)
 
     except WebSocketDisconnect:
-        print("Client disconnected.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        print("Client disconnected.", flush=True)
     finally:
         if os.path.exists(input_audio_path): os.remove(input_audio_path)
         if os.path.exists(converted_audio_path): os.remove(converted_audio_path)
