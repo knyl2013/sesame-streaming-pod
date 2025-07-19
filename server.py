@@ -5,20 +5,18 @@ import torch
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
-# ---vvv--- CRITICAL FIX #1: Import the SPECIFIC classes ---vvv---
 from transformers import pipeline, CsmProcessor, CsmForConditionalGeneration
-from scipy.io.wavfile import write
+from scipy.io.wavfile import write, read # <-- IMPORT 'read'
 import numpy as np
 import io
 from groq import Groq
 
-# --- 1. CONFIGURATION AND MODEL LOADING (Happens once on startup) ---
-
+# --- 1. CONFIGURATION AND MODEL LOADING ---
+# (No changes in this section)
 print("Starting server and loading models...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-# Get API keys from environment variables
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 HUGGING_FACE_TOKEN = os.environ.get("HUGGING_FACE_TOKEN")
 
@@ -29,38 +27,21 @@ if not HUGGING_FACE_TOKEN:
 
 llm_client = Groq(api_key=GROQ_API_KEY)
 
-# ASR (Whisper) Pipeline
 print("Loading ASR model...")
-asr_pipeline = pipeline(
-    "automatic-speech-recognition",
-    model="openai/whisper-large-v3",
-    torch_dtype=torch_dtype,
-    device=device,
-)
+asr_pipeline = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3", torch_dtype=torch_dtype, device=device)
 print("ASR model loaded.")
 
-# TTS (Sesame CSM) Models
 print("Loading TTS model...")
 TTS_REPO_ID = "sesame/csm-1b"
-
-# ---vvv--- CRITICAL FIX #2: Use the SPECIFIC classes ---vvv---
-tts_processor = CsmProcessor.from_pretrained(
-    TTS_REPO_ID, 
-    token=HUGGING_FACE_TOKEN
-) 
-tts_model = CsmForConditionalGeneration.from_pretrained(
-    TTS_REPO_ID, 
-    token=HUGGING_FACE_TOKEN
-).to(device)
-# ---^^^--- END OF CRITICAL FIXES ---^^^---
-
+tts_processor = CsmProcessor.from_pretrained(TTS_REPO_ID, token=HUGGING_FACE_TOKEN) 
+tts_model = CsmForConditionalGeneration.from_pretrained(TTS_REPO_ID, token=HUGGING_FACE_TOKEN).to(device)
 TTS_SAMPLE_RATE = 24000
-print("TTS model loaded successfully.") # Changed message for clarity
+print("TTS model loaded successfully.")
 
 app = FastAPI()
 
-# --- 2. THE WEBSOCKET CONVERSATION HANDLER (No changes needed here) ---
-# ... (The rest of your server.py code from @app.websocket onwards remains exactly the same) ...
+# --- 2. THE WEBSOCKET CONVERSATION HANDLER ---
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -72,34 +53,39 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             user_audio_bytes = await websocket.receive_bytes()
             
-            print("Transcribing user audio...")
-            with open("temp_user_audio.wav", "wb") as f:
+            # Save the incoming WAV file blob to a temporary file
+            temp_audio_path = "temp_user_audio.wav"
+            with open(temp_audio_path, "wb") as f:
                 f.write(user_audio_bytes)
-            
-            user_text = asr_pipeline("temp_user_audio.wav")["text"]
+
+            print("Transcribing user audio...")
+            user_text = asr_pipeline(temp_audio_path)["text"]
             print(f"User said: {user_text}")
             
             conversation_history.append({"role": "user", "content": user_text})
 
             print("Getting LLM response...")
-            chat_completion = llm_client.chat.completions.create(
-                messages=conversation_history,
-                model="llama3-8b-8192",
-            )
+            chat_completion = llm_client.chat.completions.create(messages=conversation_history, model="llama3-8b-8192")
             ai_response_text = chat_completion.choices[0].message.content
             print(f"AI response: {ai_response_text}")
             
             conversation_history.append({"role": "assistant", "content": ai_response_text})
 
             print("Generating and streaming AI speech...")
-            sentences = ai_response_text.replace('!', '.').replace('?', '.').split('.')
             
-            history_waveform = torch.from_numpy(np.frombuffer(user_audio_bytes, dtype=np.int16)).float().to(device) / 32768.0
+            # ---vvv--- THIS IS THE FIX ---vvv---
+            # Instead of using frombuffer, we properly READ the saved WAV file.
+            # This correctly handles the file header and gives us the raw audio data.
+            sr, wav_data = read(temp_audio_path)
+            history_waveform = torch.from_numpy(wav_data).float().to(device) / 32768.0
+            # For even more robustness, you could add code here to resample if sr != 24000
+            # ---^^^--- END OF FIX ---^^^---
+            
+            sentences = ai_response_text.replace('!', '.').replace('?', '.').split('.')
 
             for sentence in sentences:
                 sentence = sentence.strip()
-                if not sentence:
-                    continue
+                if not sentence: continue
 
                 inputs = tts_processor(text=sentence, speech_history=history_waveform, return_tensors="pt").to(device)
                 with torch.no_grad():
@@ -117,8 +103,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print("Client disconnected.")
     finally:
-        if os.path.exists("temp_user_audio.wav"):
-            os.remove("temp_user_audio.wav")
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
